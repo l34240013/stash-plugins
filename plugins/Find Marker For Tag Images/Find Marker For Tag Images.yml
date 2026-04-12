@@ -1,6 +1,6 @@
 name: Find Marker For Tag Images
 description: Associates random marker video endpoints as tag cover images.
-version: 1.0
+version: 1.1
 url: https://github.com/Lurking987/stash-plugins/tree/main/plugins/Find%20Marker%20For%20Tag%20Images
 exec:
   - python
