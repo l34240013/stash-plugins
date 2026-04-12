@@ -1,6 +1,6 @@
 name: Clear All Tag Covers
 description: Clear the image cover for all tags
-version: 0.1
+version: 0.2
 exec:
   - python
   - "{pluginDir}/clear_tag_covers.py"
