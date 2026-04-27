@@ -1,6 +1,7 @@
 (function () {
     'use strict';
     let apiKey = null;
+    let currentImageUrl = null;
 
     async function waitForElement(selector) {
         return new Promise(resolve => {
@@ -21,9 +22,35 @@
         } catch (e) { console.error("TMDB Plugin: Settings failed", e); }
     }
 
+    const injectBaseStyles = () => {
+        if (document.getElementById('tmdb-base-style')) return;
+        const style = document.createElement('style');
+        style.id = 'tmdb-base-style';
+        style.innerHTML = `
+            #group-page::before, #group-page::after {
+                content: ""; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                z-index: -1; background-size: cover; background-attachment: fixed;
+                background-position: center; transition: opacity 1.2s ease-in-out;
+                opacity: 0; pointer-events: none;
+            }
+            /* .tmdb-active controls the initial fade-in from Stash background */
+            .tmdb-active #group-page { background: transparent !important; }
+            .tmdb-active #group-page .background-image-container { display: none !important; }
+            .tmdb-active #group-page .detail-header, 
+            .tmdb-active #group-page .filtered-list-toolbar, 
+            .tmdb-active #group-page .card {
+                background-color: transparent !important; box-shadow: none !important;
+            }
+            .tmdb-active #group-page .detail-body nav { border-bottom: none !important; }
+        `;
+        document.head.appendChild(style);
+    };
+	
+    let activeLayer = 'before'; // Keep track of which layer is currently visible
+
     const updateBackdrop = async (tmdbUrl) => {
         if (!apiKey) await getSettings();
-        if (!apiKey) return;
+        if (!apiKey || !tmdbUrl) return;
 
         const idMatch = tmdbUrl.match(/(movie|tv|collection)\/(\d+)/);
         if (!idMatch) return;
@@ -34,107 +61,87 @@
             const data = await response.json();
             
             if (data.backdrops?.length > 0) {
-                const imageUrl = `https://image.tmdb.org/t/p/original${data.backdrops[Math.floor(Math.random() * data.backdrops.length)].file_path}`;
+                const randomPath = data.backdrops[Math.floor(Math.random() * data.backdrops.length)].file_path;
+                const imageUrl = `https://image.tmdb.org/t/p/original${randomPath}`;
                 
-				// 1. Get or Create the style block
-                let styleBlock = document.getElementById('tmdb-dynamic-style');
-                if (!styleBlock) {
-                    styleBlock = document.createElement('style');
-                    styleBlock.id = 'tmdb-dynamic-style';
-                    document.head.appendChild(styleBlock);
+                if (imageUrl === currentImageUrl && document.body.classList.contains('tmdb-active')) return;
+
+                const img = new Image();
+                img.src = imageUrl;
+                await img.decode();
+
+                let dynamicStyle = document.getElementById('tmdb-dynamic-image');
+                if (!dynamicStyle) {
+                    dynamicStyle = document.createElement('style');
+                    dynamicStyle.id = 'tmdb-dynamic-image';
+                    document.head.appendChild(dynamicStyle);
                 }
 
-                // 2. Start Fade Out: Only the background layer
-                const styleBase = `
-                    #group-page { position: relative; min-height: 100vh; background: transparent !important; }
-                    #group-page::before {
-                        content: "";
-                        position: fixed;
-                        top: 0; left: 0; width: 100%; height: 100%;
-                        z-index: -1;
-                        background-size: cover;
-                        background-attachment: fixed;
-                        background-position: center;
-                        transition: opacity 0.8s ease-in-out;
-                    }
-                `;
-                
-                // Set opacity to 0 on the existing background layer
-                const currentStyle = styleBlock.innerHTML;
-                styleBlock.innerHTML = styleBase + currentStyle + `#group-page::before { opacity: 0 !important; }`;
+                injectBaseStyles();
+                const isAlreadyActive = document.body.classList.contains('tmdb-active');
 
-                // 3. Preload and Wait for fade out
-                await Promise.all([
-                    new Promise(resolve => setTimeout(resolve, 800)),
-                    new Promise(resolve => { const img = new Image(); img.src = imageUrl; img.onload = resolve; })
-                ]);
+                if (!isAlreadyActive) {
+                    // INITIAL LOAD
+                    dynamicStyle.innerHTML = `
+                        #group-page::before { background-image: linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.6)), url("${imageUrl}"); opacity: 1 !important; }
+                        #group-page::after { opacity: 0 !important; }
+                    `;
+                    document.body.classList.add('tmdb-active');
+                    activeLayer = 'before';
+                } else {
+                    // SUBPAGE NAVIGATION (CROSS-FADE)
+                    const nextLayer = activeLayer === 'before' ? 'after' : 'before';
+                    
+                    // We update the styles so the 'next' layer gets the new image and fades in,
+                    // while the 'current' layer fades out but KEEPS its old image during the transition.
+                    dynamicStyle.innerHTML = `
+                        #group-page::${activeLayer} { background-image: linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.6)), url("${currentImageUrl}"); opacity: 0 !important; }
+                        #group-page::${nextLayer} { background-image: linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.6)), url("${imageUrl}"); opacity: 1 !important; }
+                    `;
+                    activeLayer = nextLayer;
+                }
 
-                // 4. Update image and Fade In
-                styleBlock.innerHTML = `
-                    ${styleBase}
-                    #group-page::before { 
-                        background-image: linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.6)), url("${imageUrl}");
-                        opacity: 1 !important;
-                    }
-                    #group-page .background-image-container { display: none !important; }
-                    #group-page .detail-header, #group-page .filtered-list-toolbar, #group-page .card {
-                        background-color: transparent !important;
-                        box-shadow: none !important;
-                    }
-                    #group-page .detail-body nav { border-bottom: none !important; }
-                `;
+                currentImageUrl = imageUrl;
+            } else {
+                clearUI();
             }
-        } catch (e) { console.error("TMDB Plugin Error:", e); }
+        } catch (e) { 
+            console.error("TMDB Plugin Error:", e);
+            clearUI();
+        }
     };
 
+    function clearUI() {
+        document.body.classList.remove('tmdb-active');
+        currentImageUrl = null;
+        const dynamic = document.getElementById('tmdb-dynamic-image');
+        if (dynamic) dynamic.remove();
+    }
 
     async function updateDOM() {
         const match = window.location.pathname.match(/\/groups\/(\d+)/);
-        if (!match) return;
-
-        const id = match[1];
-        // Wait for the specific ID shown in your HTML snippet
+        if (!match) { clearUI(); return; }
+        const groupId = match[1];
         await waitForElement('#group-page');
-
         const gRes = await fetch('/graphql', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                query: `query FindGroup($id: ID!) { findGroup(id: $id) { urls } }`, 
-                variables: { id: id } 
-            })
+            body: JSON.stringify({ query: `query FindGroup($id: ID!) { findGroup(id: $id) { urls } }`, variables: { id: groupId } })
         });
-        const gData = await gRes.json();
-        const urls = gData.data?.findGroup?.urls || [];
+        const gResult = await gRes.json();
+        const urls = gResult.data?.findGroup?.urls || [];
         const tmdbUrl = urls.find(u => u.toLowerCase().includes('themoviedb.org'));
-
-        if (tmdbUrl) {
-            updateBackdrop(tmdbUrl);
-        } else {
-            const styleBlock = document.getElementById('tmdb-dynamic-style');
-            if (styleBlock) styleBlock.remove();
-        }
+        if (tmdbUrl) { updateBackdrop(tmdbUrl); } else { clearUI(); }
     }
 
-    const handlePathChange = () => {
-        if (window.location.pathname.match(/\/groups\/\d+/)) {
-            updateDOM();
-        }
-    };
-
-    // MutationObserver to catch Stash's internal navigation
     const observeUrlChange = () => {
         let oldHref = document.location.href;
-        const body = document.querySelector("body");
         const observer = new MutationObserver(() => {
-            if (oldHref !== document.location.href) {
-                oldHref = document.location.href;
-                handlePathChange();
-            }
+            if (oldHref !== document.location.href) { oldHref = document.location.href; updateDOM(); }
         });
-        observer.observe(body, { childList: true, subtree: true });
+        observer.observe(document.body, { childList: true, subtree: true });
     };
 
-    handlePathChange();
+    updateDOM();
     observeUrlChange();
 })();
