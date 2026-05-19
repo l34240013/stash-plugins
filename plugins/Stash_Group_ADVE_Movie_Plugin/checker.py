@@ -104,6 +104,60 @@ os.makedirs(RESULT_DIR, exist_ok=True)
 # STASH GRAPHQL
 # ─────────────────────────────────────────────
 
+STASHDB_SCRAPE_SCENE_QUERY = """
+query ScrapeSingleScene($source: ScraperSourceInput!, $input: ScrapeSingleSceneInput!) {
+  scrapeSingleScene(source: $source, input: $input) {
+    performers {
+      name
+      gender
+      aliases
+    }
+  }
+}
+"""
+
+
+def get_male_performers(stash: StashInterface, scene: dict) -> list:
+    """
+    Return male performer names by querying StashDB via Stash's scrapeSingleScene.
+    Uses the scene's stored StashDB UUID as the query term — StashDB resolves UUIDs
+    directly to findScene server-side, bypassing fingerprint matching.
+    """
+    stash_ids = scene.get("stash_ids") or []
+    entry = next(
+        (s for s in stash_ids if "stashdb" in (s.get("endpoint") or "").lower()),
+        None,
+    )
+    if not entry:
+        return []
+    remote_id = entry.get("stash_id")
+    if not remote_id:
+        return []
+    endpoint = (entry.get("endpoint") or "").rstrip("/")
+    if not endpoint:
+        return []
+    try:
+        result = stash.call_GQL(STASHDB_SCRAPE_SCENE_QUERY, {
+            "source": {"stash_box_endpoint": endpoint},
+            "input": {"query": remote_id},
+        })
+        scenes = result.get("scrapeSingleScene") or []
+        males = []
+        for s in scenes:
+            for p in (s.get("performers") or []):
+                if p.get("gender") != "MALE":
+                    continue
+                name = (p.get("name") or "").strip()
+                aliases = [a.strip() for a in (p.get("aliases") or "").split(",") if a.strip()]
+                if name or aliases:
+                    males.append({"name": name, "aliases": aliases})
+        log.debug(f"StashDB males for scene {scene.get('id')}: {[m['name'] for m in males]}")
+        return males
+    except Exception as e:
+        log.warning(f"StashDB performer lookup failed: {e}")
+        return []
+
+
 def get_group(stash: StashInterface, group_id: str) -> dict:
     query = """
     query FindGroup($id: ID!) {
@@ -116,6 +170,7 @@ def get_group(stash: StashInterface, group_id: str) -> dict:
           title
           files { duration }
           performers { name }
+          stash_ids { stash_id endpoint }
         }
       }
     }
@@ -346,19 +401,23 @@ def parse_duration_secs(dur: str) -> Optional[float]:
     return None
 
 
-def match_scene(adve_scene: dict, stash_scenes: list) -> Optional[dict]:
+def match_scene(adve_scene: dict, stash_scenes: list, known_male_names: frozenset = frozenset()) -> Optional[dict]:
     """
     Match an ADVE scene to a Stash scene.
 
     Primary strategy: performer overlap AND duration within tolerance.
-      - All ADVE performers must be present in the Stash scene.
+      - All ADVE performers (minus known males) must be present in the Stash scene.
       - Duration must be within ±90 seconds (ADVE only shows whole minutes).
       - If ADVE has no duration, performer match alone is accepted.
       - If ADVE has no performers, duration match alone is accepted.
 
     Fallback: exact title match (skips generic titles like Scene 1).
+
+    known_male_names — normalized male names/aliases fetched from StashDB (not stored
+    in Stash). Stripped from ADVE performers before the subset check so that male cast
+    members listed on ADVE don't cause a false mismatch against a female-only library.
     """
-    adve_performers = performer_set(adve_scene.get("performers") or [])
+    adve_performers = performer_set(adve_scene.get("performers") or []) - known_male_names
     adve_secs = parse_duration_secs(adve_scene.get("duration", ""))
 
     for s in stash_scenes:
@@ -428,9 +487,27 @@ def build_comparison(stash: StashInterface, group_id: str) -> dict:
         return {"error": f"Failed to scrape ADVE: {e}"}
 
     stash_scenes = group.get("scenes", [])
+
+    # Fetch male performers from StashDB for each scene that has a StashDB ID.
+    # Union across all scenes — a male in any scene of this DVD should be excluded
+    # from ADVE performer checks throughout. Never stored in Stash.
+    all_male_names: set = set()
+    for s in stash_scenes:
+        for m in get_male_performers(stash, s):
+            n = normalize(m.get("name") or "")
+            if n:
+                all_male_names.add(n)
+            for alias in (m.get("aliases") or []):
+                a = normalize(alias)
+                if a:
+                    all_male_names.add(a)
+    if all_male_names:
+        log.info(f"Known males (from StashDB, not stored): {sorted(all_male_names)}")
+    known_male_names = frozenset(all_male_names)
+
     results = []
     for adve_scene in adve_data["scenes"]:
-        matched = match_scene(adve_scene, stash_scenes)
+        matched = match_scene(adve_scene, stash_scenes, known_male_names)
         results.append({
             "adve": adve_scene,
             "stash_scene": {"id": matched["id"], "title": matched["title"]} if matched else None,
